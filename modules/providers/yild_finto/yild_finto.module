@@ -1,0 +1,327 @@
+<?php
+
+/**
+ * @file
+ * Defines a Finto provider for Yild.
+ *
+ * Finto is an ontology service run by the Finnish National Library and it
+ * contains terms in English, Swedish and Finnish in several vocabularies.
+ * Some of the popular ones are yso, koko, mesh, allars etc.
+ * Read more at http://www.finto.fi.
+ */
+
+define('YILD_FINTO_API', 'http://api.finto.fi/rest/v1/');
+define('YILD_FINTO_CACHE_LIFETIME', 86400);
+define('YILD_FINTO_MAX_HITS', 20);
+define('YILD_FINTO_VOCAB', 'koko');
+
+/**
+ * Implements hook_yild_search().
+ *
+ * Performs a Yild search specific to Finto and return the result.
+ */
+function yild_finto_yild_search($search_string, $lang = 'en') {
+  $uri = YILD_FINTO_API . YILD_FINTO_VOCAB . '/search?query=' . rawurlencode($search_string) . '*&maxhits=' . YILD_FINTO_MAX_HITS . '&lang=' . $lang;
+  $cache = _yild_finto_get_search_cache($uri);
+  if (!empty($cache)) {
+    $search_result = $cache;
+  }
+  else {
+    $result = drupal_http_request($uri);
+    // Only show result if there was no error.
+    if (empty($result->error)) {
+      $search_result = drupal_json_decode($result->data);
+      _yild_finto_put_search_cache($uri, $search_result);
+    }
+    else {
+      // TODO: decide on error handling.
+      drupal_set_message(t('The request to @provider resulted in the following error: @error.', array(
+        '@provider' => yild_finto_yild_get_provider_name(),
+        '@error' => $result->error,
+      )));
+      return array();
+    }
+  }
+  return _yild_finto_parse_result($search_result['results']);
+}
+
+/**
+ * Simply returns the name of the provider.
+ *
+ * @return string
+ *   The name of the provider.
+ */
+function yild_finto_yild_get_provider_name() {
+  return 'finto';
+}
+
+/**
+ * Retrieves a search result from Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ */
+function _yild_finto_get_search_cache($cid) {
+  $cache = cache_get($cid, 'yild-cache');
+  if (!empty($cache)) {
+    if ($cache->expire > time()) {
+      return $cache->data;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Saves a search to Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ * @param array $data
+ *   The data to cache.
+ */
+function _yild_finto_put_search_cache($cid, array $data) {
+  cache_set($cid, $data, 'yild-cache', time() + YILD_FINTO_CACHE_LIFETIME);
+}
+
+/**
+ * Parses a Finto response to find unique id, name and disambiguation type.
+ *
+ * @param array $result_set
+ *   The result set received from the provider containing the suggestions.
+ */
+function _yild_finto_parse_result(array $result_set) {
+  $ret = array();
+  foreach ($result_set as $result) {
+    $id = _yild_finto_get_id($result['uri']);
+    $split_name = _yild_finto_get_disambiguator($result);
+
+    $name = !empty($split_name['name']) ? trim($split_name['name']) : $result['prefLabel'];
+    $disambiguator = !empty($split_name['disambiguator']) ? trim($split_name['disambiguator']) : NULL;
+
+    if (!empty($id) && !empty($name)) {
+      $ret[$id] = array('name' => $name, 'disambiguator' => $disambiguator);
+    }
+
+    if (count($ret) >= YILD_FINTO_MAX_HITS) {
+      break;
+    }
+  }
+  return $ret;
+}
+
+/**
+ * Returns the type of the Finto term by retrieving the broader concept.
+ *
+ * Finto requires an additional Api request to get the next broader concept.
+ *
+ * @param array $obj
+ *   The result object for one term from the original Finto request.
+ * @param string $lang
+ *   The language to use when possibly looking up parent in Finto.
+ *
+ * @return array
+ *   An array containing name and disambiguator.
+ */
+function _yild_finto_get_disambiguator($obj, $lang = 'en') {
+  $name = $obj['prefLabel'];
+  $split_name = _yild_split_name($name);
+  if (empty($split_name['name'])) {
+    $split_name['name'] = $name;
+  }
+
+  if (empty($split_name['disambiguator'])) {
+    // No disambiguator found in name, so we fetch the parent term from Finto.
+    $broader = _yild_finto_get_broader($obj['uri'], $obj['lang']);
+    if (!empty($broader[0]['prefLabel'])) {
+      $split_name['disambiguator'] = $broader[0]['prefLabel'];
+    }
+  }
+
+  return $split_name;
+}
+
+/**
+ * Returns a Yild-compatible id based on the Finto uri.
+ *
+ * @param string $id
+ *   The id as provided by the Finto.
+ */
+function _yild_finto_get_id($id) {
+  return str_replace(' ', '', 'finto:' . $id);
+}
+
+/**
+ * Fetches and returns the broader transitive of a finto concept.
+ *
+ * @param string $uri
+ *    The unique identified / uri for the Finto concept.
+ * @param string $lang
+ *    The language code to fetch the broader transitive for.
+ *
+ * @return array
+ *    An array of broader finto concepts.
+ */
+function _yild_finto_get_broader($uri, $lang = 'en') {
+  $uri = YILD_FINTO_API . YILD_FINTO_VOCAB . '/broader?uri=' . $uri . '&lang=' . $lang;
+  $cache = _yild_finto_get_search_cache($uri);
+
+  if (!empty($cache)) {
+    return $cache;
+  }
+  else {
+    $result = drupal_http_request($uri);
+    if (empty($result->error)) {
+      $data = drupal_json_decode($result->data);
+      if (!empty($data['broader'])) {
+        $broader = $data['broader'];
+        _yild_finto_put_search_cache($uri, $broader);
+        return $broader;
+      }
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Retrieves the narrower concepts from Finto.
+ *
+ * @param string $uri
+ *    The uri / unique id of the finto concept.
+ * @param string $lang
+ *    The language code to use when searching.
+ *
+ * @return array
+ *    The Finto node for the narrower concept.
+ */
+function _yild_finto_get_narrower($uri, $lang = 'en') {
+  $uri = YILD_FINTO_API . YILD_FINTO_VOCAB . '/narrower?uri=' . $uri . '&lang=' . $lang;
+  $cache = _yild_finto_get_search_cache($uri);
+
+  if (!empty($cache)) {
+    return $cache;
+  }
+  else {
+    $result = drupal_http_request($uri);
+    if (empty($result->error)) {
+      $data = drupal_json_decode($result->data);
+      if (!empty($data['narrower'])) {
+        $narrower = $data['narrower'];
+        _yild_finto_put_search_cache($uri, $narrower);
+        return $narrower;
+      }
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Retrieve Siblings for a given concept from Finto.
+ *
+ * @param string $uri
+ *    The uri / unique id of the finto concept.
+ * @param string $lang
+ *    The language code to use when searching.
+ *
+ * @return array
+ *    List of Finto sibling concepts.
+ */
+function _yild_finto_get_siblings($uri, $lang = 'en') {
+  $broader = _yild_finto_get_broader($uri, $lang);
+  if (!empty($broader)) {
+    $parenturi = $broader[0]['uri'];
+    return _yild_finto_get_narrower($parenturi, $lang);
+  }
+}
+
+/**
+ * Retrieve related concepts from Finto.
+ *
+ * @param string $uri
+ *    The uri / unique id of the finto concept.
+ * @param string $lang
+ *    The language code to use when searching.
+ *
+ * @return array
+ *    List of Finto related concepts.
+ */
+function _yild_finto_get_related($uri, $lang = 'en') {
+  $uri = YILD_FINTO_API . YILD_FINTO_VOCAB . '/related?uri=' . $uri . '&lang=' . $lang;
+  $cache = _yild_finto_get_search_cache($uri);
+
+  if (!empty($cache)) {
+    return $cache;
+  }
+  else {
+    $result = drupal_http_request($uri);
+    if (empty($result->error)) {
+      $data = drupal_json_decode($result->data);
+      if (!empty($data['related'])) {
+        $related = $data['related'];
+        _yild_finto_put_search_cache($uri, $related);
+        return $related;
+      }
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Retrieves articles with related terms and not only the same term.
+ *
+ * For generating improved term pages that may contain articles with
+ * related terms as well.
+ *
+ * @param object $yildterm
+ *    Yilditem object.
+ * @param string $lang
+ *    The language code to use when searching.
+ *
+ * @return array
+ *    Array of labels and nids.
+ */
+function yild_finto_yild_improve_term_pages($yildterm, $lang = 'en') {
+  // First look for children to the supplied term.
+  $related = array();
+  $related['children'] = _yild_finto_get_narrower($yildterm->id, $lang);
+  $related['associative'] = _yild_finto_get_related($yildterm->id, $lang);
+
+  $all_labels = $labels = array();
+  $ids = array($yildterm->id);
+  foreach ($related as $r) {
+    if (!empty($r)) {
+      foreach ($r as $term) {
+        if (!in_array($term['uri'], $ids)) {
+          $ids[] = $term['uri'];
+          if (!empty($term['prefLabel'])) {
+            $all_labels[$term['uri']] = $term['prefLabel'];
+          }
+        }
+      }
+    }
+  }
+
+  $ret = array();
+  // If we found a list of ids ...
+  if (!empty($ids)) {
+    // Loop through all field instances using the Yild autocomplete widget.
+    $instance_list = Yilditem::getInstanceList();
+    foreach ($instance_list as $instance) {
+      // Select all nodes in the database that are referenced in this instance
+      // field and have the related Finto id:s.
+      $query = "SELECT n.nid, ext." . variable_get('yild_id_field_name', 'yild_ext_id') . "_value extid FROM { field_data_" . $instance . " } fld INNER JOIN field_data_" . variable_get('yild_id_field_name', 'yild_ext_id') . " ext ON ext.entity_id=fld." . $instance . "_tid INNER JOIN node {n} ON n.nid = fld.entity_id WHERE ext." . variable_get('yild_id_field_name', 'yild_ext_id') . "_value IN (:idlist) AND n.status = :published ORDER BY n.created DESC";
+      $params = array(':idlist' => $ids, ':published' => 1);
+      $nidlist = db_query($query, $params);
+      foreach ($nidlist as $nid) {
+        if (!in_array($nid->nid, $ret)) {
+          $ret[] = $nid->nid;
+          if ($nid->extid != $yildterm->id) {
+            if (!in_array($all_labels[$nid->extid], $labels)) {
+              $labels[] = $all_labels[$nid->extid];
+            }
+          }
+        }
+      }
+    }
+    return array('nodes' => $ret, 'labels' => $labels);
+  }
+}

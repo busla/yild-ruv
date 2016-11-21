@@ -1,0 +1,254 @@
+div.yild_clearer {
+  clear: both;
+}
+
+/* Autocomplete List */
+
+/* We override overflow hidden so that Yild fields can show a second box to the
+right of the autocomplete list. */
+fieldset.yild_fieldset div#autocomplete {
+  overflow: visible;
+}
+
+div.yild_autocomplete_item div.description {
+  background-color: #eee;
+  border: 1px solid #ddd;
+  border-left: 1px solid #000;
+  display: none;
+  left: 100%;
+  line-height: 1.5em;
+  padding: 1em 1.5em 0 1.5em;
+  position: absolute;
+  top: -0.5em;
+  width: 100%;
+  white-space: normal;
+}
+
+div.yild_autocomplete_item div.description img {
+  border: 1px solid #999;
+  float: right;
+  margin-left: 1em;
+  margin-bottom: 1em;
+  width: 150px;
+}
+
+div.yild_autocomplete_item div.description h3 {
+  border-bottom: 1px solid #ccc;
+  color: #555;
+  font-size: 1.1em;
+  font-style: italic;
+  font-weight: normal;
+  margin: 0 0 0.5em 0;
+  padding: 0 0 0.5em 0;
+}
+
+div.yild_autocomplete_item div.description p {
+  padding: 0;
+  margin: 0 0 1em 0;
+}
+
+div.yild_autocomplete_item div.yild_text_container {
+  overflow: hidden;
+  width: 100%;
+}
+
+div.yild_autocomplete_item span.yild_autocomplete_frequency {
+  background-color: #668a19;
+  border-radius: 3px;
+  color: #fff;
+  float: left;
+  font-size: 0.7em;
+  padding: 0 0.3em;
+  margin: 0.1em 0.3em 0.1em 0;
+  overflow: hidden;
+  text-align: center;
+  width: 30px;
+}
+
+div.yild_autocomplete_item span.yild_autocomplete_provider {
+  background-color: #336699;
+  border-radius: 3px;
+  color: #fff;
+  float: left;
+  font-size: 0.7em;
+  padding: 0 0.3em;
+  margin: 0.1em 0.5em 0.1em 0;
+  overflow: hidden;
+  text-align: center;
+  width: 60px;
+}
+
+div.yild_autocomplete_item span.yild_autocomplete-disambiguator {
+  color: #555;
+  font-style: italic;
+}
+
+li.selected div.yild_autocomplete_item span.yild_autocomplete_disambiguator {
+  color: #ccc;
+}
+
+li.selected div.yild_autocomplete_item div.description {
+  display: block;
+}
+
+/* Make the width of the field less than 100% for vertical panes to make room for the popup infobox. */
+
+.vertical-tabs .form-type-textfield input.yild_autocomplete {
+  width: 50%;
+}
+
+/* Term buttons */
+
+ul.yild_tags_container,
+.block ul.yild_tags_container {
+  margin: 0;
+}
+
+ul.yild_tags_container:after,
+div.yild_analyse_container:after,
+div.yild_progress_bar:after {
+  clear: both;
+  content: '';
+  display: block;
+}
+
+div.yild_analyse_container div.yild_analyse_label {
+  display: none;
+}
+
+ul.yild_tags_container li.yild_term,
+div.yild_analyse_container li.yild_term,
+ul.yild_tags_container li.yild_placeholder {
+  background-color: #eee;
+  border: 1px solid #999;
+  border-radius: 5px;
+  cursor: move;
+  float: left;
+  padding: 0.2em 0.3em;
+  font-size: 0.9em;
+  margin-right: 1em;
+  margin-bottom: 0.5em;
+  list-style-type: none;
+}
+
+li.yild_term span.label {
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+  display: block;
+  max-width: 250px;
+}
+
+ul.yild_tags_container li.yild_placeholder {
+  border: none;
+  height: 1.8em;
+  width: 7em;
+}
+
+/* Progress bar */
+div.yild_progress_bar {
+  background-color: #dedede;
+  margin-bottom: 1em;
+  width: 70%;
+}
+
+div.yild_progress_bar div.bar {
+  background-color: #990000;
+  float: left;
+  height: 20px;
+  opacity: 0.7;
+}
+
+div.yild_progress_bar div.bar:before {
+  content: "☹";
+  color: #fff;
+  display: block;
+  font-size: 1.5em;
+  margin: 0 5px;
+}
+
+div.yild_progress_bar div.bar-50 {
+  background-color: #ffcc33;
+}
+
+div.yild_progress_bar div.bar-100 {
+  background-color: #009900;
+}
+
+div.yild_progress_bar div.bar-100:before {
+  content: "☺";
+  color: #fff;
+  display: block;
+  font-size: 1.5em;
+  margin: 0 5px;
+}
+
+div.yild_analyse_container ul.yild_suggestions_container {
+  margin: 0;
+}
+
+div.yild_analyse_container li.yild_term:hover,
+ul.yild_tags_container li.yild_term.yild_inactive,
+div.yild_analyse_container li.yild_term.yild_inactive:hover {
+  border: 1px solid #009900;
+}
+
+ul.yild_tags_container li.yild_term.yild_inactive,
+div.yild_analyse_container li.yild_term.yild_inactive {
+  background-color: #ddd;
+  border: 1px solid #ccc;
+  color: #777;
+  cursor: pointer;
+}
+
+ul.yild_tags_container div.yild_remove,
+div.yild_analyse_container div.yild_remove {
+  color: #999;
+  cursor: pointer;
+  float: right;
+  font-size: 1.5em;
+  margin-left: 0.3em;
+}
+
+/* Hide the data field */
+input.hidden_yild_field {
+  display: none;
+}
+
+/* Analyse container */
+div.yild_analyse_container {
+  border: 1px dotted #ccc;
+  background-color: #eee;
+  padding: 1em;
+}
+
+div.yild_throbber {
+  display: none;
+  margin-bottom: 0.5em;
+}
+
+div.yild_analyse_label {
+  margin-bottom: 0.5em;
+}
+
+div.yild_analyse_button_container {
+  clear: both;
+}
+/* Analyse button */
+div.yild_analyse_button {
+  background-color: #aaa;
+  border-radius: 5px;
+  border: 1px solid #999;
+  color: #fff;
+  cursor: pointer;
+  float: left;
+  font-size: 0.9em;
+  padding: 0.2em 1em;
+  text-align: center;
+}
+
+div.yild_analyse_button:hover {
+  background-color: #999;
+  border: 1px solid #777;
+  color: #555;
+}

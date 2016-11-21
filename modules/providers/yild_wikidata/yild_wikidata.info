@@ -1,0 +1,12 @@
+name = Yild / Wikidata
+description = Provides Wikidata integration for Yild
+package = Yild providers
+core = 7.x
+dependencies[] = yild
+
+; Information added by Drupal.org packaging script on 2016-11-17
+version = "7.x-1.x-dev"
+core = "7.x"
+project = "yild"
+datestamp = "1479402112"
+

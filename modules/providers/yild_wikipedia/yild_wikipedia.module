@@ -1,0 +1,156 @@
+<?php
+
+/**
+ * @file
+ * Defines a Wikipedia provider for Yild.
+ */
+
+define('YILD_WIKIPEDIA_API', 'http://en.wikipedia.org/w/api.php');
+define('YILD_WIKIPEDIA_CACHE_LIFETIME', 86400);
+define('YILD_WIKIPEDIA_MAX_HITS', 10);
+
+/**
+ * Implements hook_yild_search().
+ *
+ * Performs a Yild search specific to Wikipedia.
+ */
+function yild_wikipedia_yild_search($search_string, $lang = 'en') {
+  $baseuri = YILD_WIKIPEDIA_API;
+  if (!lang != 'en') {
+    // Language is specified by changing the url to contain the language code.
+    // such as http://sv.wikipedia.org.
+    $baseuri = str_replace('en.', $lang . '.', $baseuri);
+  }
+
+  $uri = $baseuri . '?format=json&action=query&generator=search&gsrnamespace=0&gsrsearch=' . rawurlencode($search_string) . '&gsrlimit=' . YILD_WIKIDATA_MAX_HITS . '&prop=pageimages|extracts&pilimit=max&exintro&explaintext&exsentences=1&exlimit=max';
+
+  $cache = _yild_wikipedia_get_search_cache($uri);
+  if (!empty($cache)) {
+    $search_result = $cache;
+  }
+  else {
+    $options = array(
+      'method' => 'GET',
+      'timeout' => 3,
+      'headers' => array(
+        'Accept' => 'application/json',
+      ),
+    );
+
+    $result = drupal_http_request($uri, $options);
+    // Only show result if there was no error.
+    if (empty($result->error)) {
+      $search_result = drupal_json_decode($result->data);
+      _yild_wikipedia_put_search_cache($uri, $search_result);
+    }
+    else {
+      // TODO: decide on error handling.
+      drupal_set_message(t('The request to @provider resulted in the following error: @error.', array(
+        '@provider' => yild_wikipedia_yild_get_provider_name(),
+        '@error' => $result->error,
+      )));
+      return array();
+    }
+  }
+
+  if (!empty($search_result['query']['pages'])) {
+    return _yild_wikipedia_parse_result($search_result['query']['pages']);
+  }
+  return array();
+}
+
+/**
+ * Simply returns the name of the provider.
+ *
+ * @return string
+ *   The name of the provider.
+ */
+function yild_wikipedia_yild_get_provider_name() {
+  return 'wikipedia';
+}
+
+/**
+ * Retrieves a search result from Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ */
+function _yild_wikipedia_get_search_cache($cid) {
+  $cache = cache_get($cid, 'yild-cache');
+  if (!empty($cache)) {
+    if ($cache->expire > time()) {
+      return $cache->data;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Saves a search to Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ * @param array $data
+ *   The data to cache.
+ */
+function _yild_wikipedia_put_search_cache($cid, array $data) {
+  cache_set($cid, $data, 'yild-cache', time() + YILD_WIKIPEDIA_CACHE_LIFETIME);
+}
+
+/**
+ * Parses a Wikipedia response to find unique id, name and disambiguation type.
+ *
+ * @param array $result_set
+ *   The result set received from the provider containing the suggestions.
+ */
+function _yild_wikipedia_parse_result(array $result_set) {
+  $ret = array();
+  foreach ($result_set as $result) {
+    $id = _yild_wikipedia_get_id($result['title']);
+    $name = $result['title'];
+    $disambiguator = $result['extract'];
+    if (strlen($disambiguator) > 50) {
+      $description = $disambiguator;
+      $disambiguator = '';
+    }
+    else {
+      $description = '';
+    }
+
+    $image = !empty($result['thumbnail']) ? $result['thumbnail']['source'] : '';
+    $size_pattern = '/\/[0-9]*px/';
+    $image = preg_replace($size_pattern, '/150px', $image);
+    if (!empty($image)) {
+      $data[] = 'image:' . $image;
+    }
+
+    if (!empty($id) && !empty($name)) {
+      $ret[$id] = array(
+        'name' => $name,
+        'disambiguator' => $disambiguator,
+        'description' => $description,
+        'data' => implode(';', $data),
+      );
+    }
+  }
+  return $ret;
+}
+
+/**
+ * Extracts either the notable type or the first type from a search result item.
+ */
+function _yild_wikipedia_get_type($obj) {
+  // Wikipedia returns no types or categories in the search result.
+  return NULL;
+}
+
+/**
+ * Returns a Yild-compatible id based on the Wikipedia title.
+ *
+ * @param string $title
+ *   Wikipedia uses the title as unique Id.
+ */
+function _yild_wikipedia_get_id($title) {
+  $id_slug = str_replace(' ', '_', $title);
+  return str_replace(' ', '', 'wikipedia:' . $id_slug);
+}

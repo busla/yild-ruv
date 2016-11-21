@@ -1,0 +1,23 @@
+; Yild stands for "Yild integrator for linked data" and is a module for
+; connecting external ontologies and taxonomies to Drupal through their public
+; APIs.
+; Each external provider needs to be defined in its own submodule (in the
+; linkdata/modules folder) and enabled. For your convenience, a handful of
+; providers already exist. If you make a new one, please inform us if you think
+; it could be included in the module.
+
+name = Yild core
+description = Provides integration with external ontologies and taxonomies.
+package = Yild
+core = 7.x
+dependencies[] = taxonomy
+configure = admin/config/yild/general
+files[] = Yilditem.php
+files[] = Yildsearch.php
+
+; Information added by Drupal.org packaging script on 2016-11-17
+version = "7.x-1.x-dev"
+core = "7.x"
+project = "yild"
+datestamp = "1479402112"
+

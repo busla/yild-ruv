@@ -1,0 +1,476 @@
+<?php
+/**
+ * @file
+ * YILD does Integration of Linked Data providers in Drupal.
+ */
+
+// Load yild blocks.
+module_load_include('inc', 'yild', 'yild.blocks');
+
+/**
+ * Implements hook_menu().
+ */
+function yild_menu() {
+  $items = array();
+
+  $items['admin/config/yild'] = array(
+    'title' => 'Yild configuration',
+    'description' => 'Configuration of Yild core and providers.',
+    'position' => 'left',
+    'page callback' => 'system_admin_menu_block_page',
+    'access arguments' => array('administer site configuration'),
+    'file' => 'system.admin.inc',
+    'file path' => drupal_get_path('module', 'system'),
+  );
+
+  $items['admin/config/yild/general'] = array(
+    'title' => 'Yild global settings',
+    'description' => 'Settings common for all providers in Yild.',
+    'weight' => -20,
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('yild_admin_settings_form'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'yild.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  // Autocomplete query.
+  $items['yild/autocomplete'] = array(
+    'title' => 'Autocomplete results',
+    'page callback' => '_yild_autocomplete',
+    'delivery callback' => 'drupal_json_output',
+    'access callback' => 'user_is_logged_in',
+    'type' => MENU_CALLBACK,
+  );
+
+  // Autocomplete query.
+  $items['yild/analyse'] = array(
+    'title' => 'Analyse a text',
+    'page callback' => '_yild_analyse',
+    'delivery callback' => 'drupal_json_output',
+    'access callback' => 'user_is_logged_in',
+    'type' => MENU_CALLBACK,
+  );
+
+  // Verify that the api endpoint is activated in the settings.
+  if (variable_get('yild_expose_endpoint', "1")) {
+    // Expose an api endpoint for looking up content for a specific tag.
+    $items['yild/api/list/%'] = array(
+      'title' => 'List content for Yild tag',
+      'page callback' => '_yild_list_content_by_extid',
+      'page arguments' => array(3),
+      'delivery callback' => 'drupal_json_output',
+      'access arguments' => array('access content'),
+      'file' => 'yild.api.inc',
+      'type' => MENU_CALLBACK,
+    );
+
+    $items['yild/api/provider/%'] = array(
+      'title' => 'List terms and their articles from a specific provider.',
+      'page callback' => '_yild_list_provider_terms',
+      'page arguments' => array(3),
+      'delivery callback' => 'drupal_json_output',
+      'access arguments' => array('access content'),
+      'file' => 'yild.api.inc',
+      'type' => MENU_CALLBACK,
+    );
+  }
+
+  return $items;
+}
+
+/**
+ * Implements hook_menu_alter().
+ */
+function yild_menu_alter(&$menu) {
+  if (variable_get('yild_improve_term_pages', "0") && count(module_implements('yild_improve_term_pages')) > 0) {
+    if (!empty($menu['taxonomy/term/%taxonomy_term'])) {
+      $menu['taxonomy/term/%taxonomy_term']['page callback'] = '_yild_taxonomy_term_page';
+    }
+  }
+}
+
+/**
+ * Implements hook_field_widget_info().
+ *
+ * Defines the widget for autocompleting taxonomy fields using Yild.
+ */
+function yild_field_widget_info() {
+  // Define the widget that queries ALL providers.
+  $widgets = array(
+    'yild_term_reference_autocomplete' => array(
+      'label' => t('Yild autocomplete'),
+      'field types' => array('taxonomy_term_reference'),
+      'settings' => array(
+        'size' => 100,
+      ),
+      'behaviors' => array(
+        'multiple values' => FIELD_BEHAVIOR_CUSTOM,
+      ),
+      'weight' => 10,
+    ),
+  );
+
+  return $widgets;
+}
+
+/**
+ * Implements hook_field_widget_settings_form().
+ */
+function yild_field_widget_settings_form($field, $instance) {
+  $widget = $instance['widget'];
+  $settings = $widget['settings'];
+  if ($widget['type'] == 'yild_term_reference_autocomplete') {
+    // Find all activated providers.
+    $hook = 'yild_get_provider_name';
+    $providers = array();
+    foreach (module_implements($hook) as $module) {
+      $providers[] = module_invoke($module, $hook);
+    }
+    $default = isset($settings['providers']) ? $settings['providers'] : array();
+    $form['providers'] = array(
+      '#type' => 'checkboxes',
+      '#title' => t("Use the following providers for autocomplete"),
+      '#options' => drupal_map_assoc($providers),
+      '#default_value' => $default,
+    );
+  }
+  return $form;
+}
+
+/**
+ * Implements hook_field_widget_form().
+ *
+ * Defines a widget for looking up terms from various providers.
+ * Provides a Yild autocomplete lookup widget connected to one or all configured
+ * providers. The results will be sorted according to usage frequency in Drupal
+ * and the secondary sorting is by provider and then the order in which the
+ * provider delivers individual suggestions.
+ */
+function yild_field_widget_form(&$form, &$form_state, $field, $instance, $langcode, $items, $delta, $element) {
+  // Check the widget type for this field instance.
+  if ($instance['widget']['type'] == 'yild_term_reference_autocomplete') {
+    // Define the additional field names.
+    $provider_field_name = variable_get('yild_provider_field_name', 'yild_provider');
+    $id_field_name = variable_get('yild_id_field_name', 'yild_ext_id');
+    $disambiguator_field_name = variable_get('yild_disambiguator_field_name', 'yild_disambiguator');
+    $data_field_name = variable_get('yild_data_field_name', 'yild_data');
+
+    // Resolve the list of providers we want to use for this widget.
+    $providers = array();
+    if (!empty($instance['widget']['settings']['providers'])) {
+      foreach ($instance['widget']['settings']['providers'] as $name => $val) {
+        if (trim($val) == trim($name) && !empty($val)) {
+          $providers[] = trim($name);
+        }
+      }
+    }
+
+    // Check the current value and load all terms as needed.
+    // See if we are editing a form and show boxes/buttons for all existing
+    // terms.
+    $node = !empty($form['#node']) ? $form['#node'] : NULL;
+    $termbuttons = array();
+    if (!empty($node)) {
+      if (!empty($node->nid)) {
+        // We're editing a node, show the current tags!
+        $termfieldname = $element['#field_name'];
+        if (!empty($node->$termfieldname)) {
+          $termfield = $node->$termfieldname;
+          $terms = $termfield[LANGUAGE_NONE];
+          $termids = array();
+          $hiddenvalues = array();
+          // Loop once to get all ids.
+          foreach ($terms as $t) {
+            $termids[] = $t['tid'];
+          }
+          // Load all term objects.
+          $terms = taxonomy_term_load_multiple($termids);
+          foreach ($terms as $t) {
+            if (!empty($t->{$id_field_name}[LANGUAGE_NONE]) && !empty($t->{$provider_field_name}[LANGUAGE_NONE])) {
+              $id = $t->{$id_field_name}[LANGUAGE_NONE][0]['value'];
+              if (!empty($id)) {
+                $provider = $t->{$provider_field_name}[LANGUAGE_NONE][0]['value'];
+                $name = $t->name;
+                $disambiguator = !empty($t->{$disambiguator_field_name}) ? $t->{$disambiguator_field_name}[LANGUAGE_NONE][0]['value'] : '';
+                $data = !empty($t->{$data_field_name}) ? $t->{$data_field_name}[LANGUAGE_NONE][0]['value'] : '';
+                $hiddenvalues[] = '"' . $provider . ':' . $id . '|' . $name . '|' . $disambiguator . '|' . $data . '"';
+                $termbuttons[] = '<li class="yild_term" id="' . check_plain($provider) . check_plain($id) .
+                  '" data-id="' . check_plain($id) . '" data-provider="' . check_plain($provider) . '" data-label="' .
+                  check_plain($name) . '" data-disambiguator="' . check_plain($disambiguator) . '" data-data="' .
+                  check_plain($data) . '"><div class="yild_remove">&otimes;</div><span class="label">' .
+                  (variable_get('yild_show_provider', "1") ? check_plain($provider) . ': ' : '') .
+                  check_plain($name) . (!empty($disambiguator) ? ' <span class="disambiguator">(' . check_plain($disambiguator) . ')</span>' : '') .
+                  '</span></li>';
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Check if this provider provides analyse functionality.
+    $show_analyse_button = FALSE;
+    foreach (module_implements('yild_analyse') as $module_name) {
+      foreach ($providers as $provider) {
+        if ($module_name == 'yild_' . $provider) {
+          $show_analyse_button = TRUE;
+        }
+      }
+    }
+
+    $element += array(
+      '#type' => 'fieldset',
+      '#delta' => $delta,
+      '#attributes' => array('class' => array('yild_fieldset')),
+      '#element_validate' => array('yild_validate'),
+      '#attached' => array(
+        'js' => array(
+          drupal_get_path('module', 'yild') . '/assets/yild.js',
+          array(
+            'data' => array('yild' => array('yild_show_provider' => variable_get('yild_show_provider', "1"))),
+            'type' => 'setting',
+          ),
+        ),
+        'css' => array(drupal_get_path('module', 'yild') . '/assets/yild.css'),
+      ),
+    );
+
+    // We need a hidden field for all the values we've looked up from various
+    // providers. These are the values that get submitted when we save the form.
+    $element['hidden_yild_field'] = array(
+      '#type' => 'hidden',
+      '#attributes' => array('class' => array('hidden_yild_field')),
+      '#weight' => 0,
+      '#default_value' => !empty($hiddenvalues) ? implode(',', $hiddenvalues) : NULL,
+    );
+
+    // We need a visible autocomplete field that only serves as the
+    // mechanism for looking up things from our providers.
+    $element['visible_yild_autocomplete_field'] = array(
+      '#type' => 'textfield',
+      '#attributes' => array('class' => array_merge(array('yild_autocomplete'), $providers)),
+      '#weight' => 0,
+      '#size' => 100,
+      '#maxlength' => 2048,
+      '#autocomplete_path' => $GLOBALS['base_url'] . '/yild/autocomplete/' . implode('--', $providers),
+    );
+
+    // Finally we need an area where we display "term-buttons" for all the
+    // selected terms.
+    $element['visible_yild_autocomplete_field']['#suffix']
+      = (variable_get('yild_show_progress_bar', 1) ?
+        '<div class="yild_progress_bar" data-amount="' . variable_get('yild_progress_bar_amount', 8) . '"><div class="bar"><!-- empty --></div></div>' : '') .
+      '<ul class="yild_tags_container">' . implode("\r\n", $termbuttons) . '</ul>' .
+      ($show_analyse_button ? '<div class="yild_analyse_container"><div class="yild_analyse_label">' .
+        t("Click the terms you want to use.") .
+        '</div><ul class="yild_suggestions_container"></ul><div class="yild_analyse_button_container"><div class="yild_throbber ajax-progress ajax-progress-throbber"><div class="throbber"></div>' .
+        t("Retrieving term suggestions.") . '</div><div class="yild_analyse_button">' . t("Analyse text and suggest terms.") . '</div></div></div>' : '');
+  }
+
+  return $element;
+}
+
+/**
+ * Validator function for yild autocomplete field.
+ *
+ * @param array $element
+ *    The field element being processed.
+ * @param array $form_state
+ *    The state of the form.
+ */
+function yild_validate($element, &$form_state) {
+  $yild_tags = drupal_explode_tags($form_state['values'][$element['#field_name']][$element['#language']]['hidden_yild_field']);
+  $values = [];
+  $providers = [];
+
+  // Register used providers for this widget.
+  $widget_instance = field_widget_instance($element, $form_state);
+  if (!empty($widget_instance['widget']['settings']['providers'])) {
+    foreach ($widget_instance['widget']['settings']['providers'] as $provider_name => $provider_value) {
+      if (!empty($provider_value)) {
+        $providers[] = $provider_name;
+      }
+    }
+  }
+  // Convert all string-encoded terms to real drupal term objects.
+  foreach ($yild_tags as $yild_tag) {
+    if (!empty(trim($yild_tag))) {
+      $yild_item = new Yilditem(trim($yild_tag));
+      if ($yild_item->isYildTerm()) {
+        // Give other providers a chance to modify terms.
+        $hook = 'yild_validate';
+        foreach (module_implements($hook) as $module) {
+          // Only invoke module if this field widget uses this provider.
+          if (in_array(module_invoke($module, 'yild_get_provider_name'), $providers)) {
+            module_invoke($module, $hook, $yild_item);
+          }
+        }
+        $yild_term = $yild_item->getDrupalTermArray(NULL, variable_get('yild_update_terms', '0') == 1);
+        if (empty($yild_term['tid'])) {
+          $yild_term['tid'] = 'autocreate';
+        }
+        $values[] = $yild_term;
+      }
+    }
+  }
+  form_set_value($element, $values, $form_state);
+}
+
+/**
+ * Callback function for the autocomplete menu item.
+ *
+ * Looks for a search string from all applicable providers.
+ *
+ * @param string $search_string
+ *   The autocomplete string to search for using Yild.
+ *
+ * @return array
+ *   An array containing the search results to be json encoded for output.
+ */
+function _yild_autocomplete($providers, $search_string = NULL) {
+  // Retrieve the providers for the content type.
+  $providerlist = explode('--', $providers);
+  $yildsearch = new Yildsearch($providerlist);
+
+  // Request the search result from all modules implementing hook_yild_search.
+  $hook = 'yild_search';
+  foreach (module_implements($hook) as $module) {
+    $module_provider = module_invoke($module, 'yild_get_provider_name');
+    if (in_array($module_provider, $providerlist)) {
+      $yildsearch->addResults(module_invoke($module, $hook, $search_string, variable_get('yild_result_language', 'en')));
+    }
+  }
+  return $yildsearch->parseResults();
+}
+
+/**
+ * Send a text for analysis.
+ */
+function _yild_analyse() {
+  $text_to_analyse = $_POST['text_to_analyse'];
+  if (!empty($text_to_analyse)) {
+    $hook = 'yild_analyse';
+    $term_suggestions = array();
+    // Loop through all modules implementing yild_analyse.
+    foreach (module_implements($hook) as $module) {
+      $term_suggestions = array_merge($term_suggestions, module_invoke($module, $hook, $text_to_analyse, variable_get('yild_result_language', 'en')));
+    }
+  }
+  return $term_suggestions;
+}
+
+/**
+ * Separates disambiguator from name.
+ *
+ * Many providers have the disambiguator as part of the name, such as
+ * The Matrix, movie or The Matrix (movie).
+ * This function tries to find these and return them separated.
+ *
+ * @param string $name
+ *   The name including a possible disambiguator.
+ *
+ * @return array
+ *   An array containing name and disambiguator separated.
+ */
+function _yild_split_name($name) {
+  // Captures all of these:
+  // U96 Das Boot, movie, creative work.
+  // U96 Das Boot (movie, creative work).
+  // U96 Das Boot (movie) (creative work).
+  $split_pattern  = '/\(|,?([^(),]*)\)?/';
+  $split_name = '';
+  $disambiguator = array();
+  if (preg_match_all($split_pattern, $name, $matches)) {
+    if (!empty($matches[1])) {
+      foreach ($matches[1] as $m) {
+        if (!empty($m)) {
+          if (empty($split_name)) {
+            $split_name = trim($m);
+          }
+          else {
+            $disambiguator[] = trim($m);
+          }
+        }
+      }
+    }
+    if (!empty($split_name) && !empty($disambiguator)) {
+      return array(
+        'name' => $split_name,
+        'disambiguator' => implode(',', $disambiguator),
+      );
+    }
+  }
+  return array('name' => $name, 'disambiguator' => '');
+}
+
+/**
+ * Implements hook_theme().
+ *
+ * Tell the theme about yild templates.
+ */
+function yild_theme($existing, $type, $theme, $path) {
+  // Define the template for the related block.
+  return array(
+    'yild_related' => array(
+      'template' => 'block--yild--yild-related',
+      'path' => drupal_get_path('module', 'yild') . '/templates',
+      'variables' => array('items' => NULL),
+    ),
+  );
+}
+
+/**
+ * Implements hook_taxonomy_term_page().
+ *
+ * For overriding normal taxonomy pages with Yild augmented views in cases where
+ * it is possible.
+ */
+function _yild_taxonomy_term_page($term) {
+  // Define amount of terms per page.
+  $per_page = variable_get('yild_terms_per_page', 20);
+
+  // First check if the provider for this term implements improved term pages.
+  if ($term->vocabulary_machine_name == variable_get('yild_vocabulary', 'yild_tags')) {
+    $yildterm = new Yilditem($term);
+    $labels = array();
+    // If this appears to be a valid Yild item, proceed to render improved list
+    // of articles.
+    if ($yildterm->isYildTerm()) {
+      // Check if the provider module implements improved term pages.
+      $hook = 'yild_improve_term_pages';
+      if (module_hook($yildterm->getProviderModule(), $hook)) {
+        $articles = array();
+        $related = module_invoke($yildterm->getProviderModule(), $hook, $yildterm, variable_get('yild_result_language', 'en'));
+        // Register all term labels included on this term page.
+        $labels = array_merge($labels, $related['labels']);
+
+        // Register all nodes we want on this term page.
+        foreach ($related['nodes'] as $nid) {
+          if (!in_array($nid, $articles)) {
+            $articles[] = $nid;
+          }
+        }
+
+        // Set the related term labels as term page title in Drupal.
+        if (count($labels)) {
+          $original_title = drupal_get_title();
+          drupal_set_title(ucfirst($original_title) . ' (' . implode(', ', array_slice($labels, 0, 5)) . ')');
+        }
+
+        $current_page = pager_default_initialize(count($articles), $per_page);
+        $chunks = array_chunk($articles, $per_page, TRUE);
+
+        $pager = array(
+          '#markup' => theme('pager', array('quantity', count($articles))),
+        );
+
+        return array('content' => array('nodes' => node_view_multiple(node_load_multiple($chunks[$current_page]))), 'pager' => $pager);
+      }
+    }
+  }
+
+  // As a fallback, we return the normal taxonomy page.
+  module_load_include('inc', 'taxonomy', 'taxonomy.pages');
+  return taxonomy_term_page($term);
+}

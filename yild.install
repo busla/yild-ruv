@@ -1,0 +1,277 @@
+<?php
+
+/**
+ * @file
+ * Operations to perform during install, enable, uninstall and disable.
+ */
+
+/**
+ * Implements hook_enable().
+ */
+function yild_enable() {
+  _yild_create_vocabulary();
+  _yild_create_id_field();
+  _yild_create_provider_field();
+  _yild_create_disambiguator_field();
+  _yild_create_data_field();
+  _yild_fix_instances();
+}
+
+/**
+ * Creates the Yild vocabulary under Drupal taxonomies.
+ */
+function _yild_create_vocabulary() {
+  $yild_vocabulary = variable_get('yild_vocabulary', 'yild_tags');
+  $vocabulary = taxonomy_vocabulary_machine_name_load($yild_vocabulary);
+  // Vocabulary not found, so let's create it.
+  if (empty($vocabulary)) {
+    $vocabulary = new stdClass();
+    $vocabulary->name = 'Yild';
+    $vocabulary->machine_name = $yild_vocabulary;
+    $vocabulary->description = t('Yild vocabulary');
+    $vocabulary->hierarchy = 0;
+    $vocabulary->module = 'yild';
+    $vocabulary->weight = -5;
+    taxonomy_vocabulary_save($vocabulary);
+    variable_set('yild_vocabulary', $vocabulary->machine_name);
+  }
+}
+
+/**
+ * Creates the Yild external id field and its instance.
+ */
+function _yild_create_id_field() {
+  $yild_vocabulary = variable_get('yild_vocabulary', 'yild_tags');
+
+  // Create external id field.
+  $id_field_name = variable_get('yild_id_field_name', 'yild_ext_id');
+  $id_field = field_info_field($id_field_name);
+  if (empty($id_field)) {
+    $field = array(
+      'field_name' => $id_field_name,
+      'type' => 'text',
+      'label' => t("The Yild external id issued by the provider."),
+    );
+    field_create_field($field);
+  }
+
+  // Create the instance.
+  $id_instance = field_info_instance('taxonomy_term', $id_field_name, $yild_vocabulary);
+  if (empty($id_instance)) {
+    $instance = array(
+      'field_name' => $id_field_name,
+      'label' => t('Yild external id'),
+      'entity_type' => 'taxonomy_term',
+      'bundle' => $yild_vocabulary,
+      'required' => TRUE,
+      'description' => t('The unique external id issued by the Yild provider.'),
+      'display' => array(
+        'default' => array(
+          'label' => 'hidden',
+          'type' => 'hidden',
+        ),
+      ),
+    );
+    field_create_instance($instance);
+  }
+}
+
+/**
+ * Creates the Yild provider field and its instance.
+ */
+function _yild_create_provider_field() {
+  $yild_vocabulary = variable_get('yild_vocabulary', 'yild_tags');
+
+  // Create provider field.
+  $provider_field_name = variable_get('yild_provider_field_name', 'yild_provider');
+  $provider_field = field_info_field($provider_field_name);
+  if (empty($provider_field)) {
+    $field = array(
+      'field_name' => $provider_field_name,
+      'type' => 'text',
+      'label' => t("The name of the Yild provider."),
+    );
+    field_create_field($field);
+  }
+
+  // Create the instance.
+  $provider_instance = field_info_instance('taxonomy_term', $provider_field_name, $yild_vocabulary);
+  if (empty($provider_instance)) {
+    $instance = array(
+      'field_name' => $provider_field_name,
+      'label' => t('Yild provider'),
+      'entity_type' => 'taxonomy_term',
+      'bundle' => $yild_vocabulary,
+      'required' => TRUE,
+      'description' => t('The unique name of the Yild provider.'),
+      'display' => array(
+        'default' => array(
+          'label' => 'hidden',
+          'type' => 'hidden',
+        ),
+      ),
+    );
+    field_create_instance($instance);
+  }
+}
+
+/**
+ * Creates the Yild disambiguator field and its instance.
+ */
+function _yild_create_disambiguator_field() {
+  $yild_vocabulary = variable_get('yild_vocabulary', 'yild_tags');
+
+  // Create disambiguator field.
+  $disambiguator_field_name = variable_get('yild_disambiguator_field_name', 'yild_disambiguator');
+  $disambiguator_field = field_info_field($disambiguator_field_name);
+  if (empty($disambiguator_field)) {
+    $field = array(
+      'field_name' => $disambiguator_field_name,
+      'type' => 'text',
+      'label' => t("Disambiguator string provided by the Yild provider."),
+    );
+    field_create_field($field);
+  }
+
+  // Create the instance.
+  $disambiguator_instance = field_info_instance('taxonomy_term', $disambiguator_field_name, $yild_vocabulary);
+  if (empty($disambiguator_instance)) {
+    $instance = array(
+      'field_name' => $disambiguator_field_name,
+      'label' => t('Yild disambiguator'),
+      'entity_type' => 'taxonomy_term',
+      'bundle' => $yild_vocabulary,
+      'required' => FALSE,
+      'description' => t("Disambiguator string provided by the Yild provider."),
+      'display' => array(
+        'default' => array(
+          'label' => 'hidden',
+        ),
+      ),
+    );
+    field_create_instance($instance);
+  }
+}
+
+/**
+ * Creates the Yild data field and its instance.
+ */
+function _yild_create_data_field() {
+  $yild_vocabulary = variable_get('yild_vocabulary', 'yild_tags');
+
+  // Create data field for storing any data about the item.
+  $data_field_name = variable_get('yild_data_field_name', 'yild_data');
+  $data_field = field_info_field($data_field_name);
+  if (empty($data_field)) {
+    $field = array(
+      'field_name' => $data_field_name,
+      'type' => 'text',
+      'settings' => array(
+        'max_length' => 4096,
+      ),
+      'label' => t("Any data that needs to be stored for this object."),
+    );
+    field_create_field($field);
+  }
+
+  // Create the instance.
+  $data_instance = field_info_instance('taxonomy_term', $data_field_name, $yild_vocabulary);
+  if (empty($data_instance)) {
+    $instance = array(
+      'field_name' => $data_field_name,
+      'label' => t('Yild data'),
+      'entity_type' => 'taxonomy_term',
+      'bundle' => $yild_vocabulary,
+      'required' => FALSE,
+      'description' => t("Data for this object."),
+      'display' => array(
+        'default' => array(
+          'label' => 'hidden',
+          'type' => 'hidden',
+        ),
+      ),
+    );
+    field_create_instance($instance);
+  }
+}
+
+/**
+ * Create data field that was introduced later.
+ */
+function yild_update_7100() {
+  _yild_create_data_field();
+}
+
+/**
+ * Fixes instance parameters such as display and required for all fields.
+ */
+function yild_update_7101() {
+  _yild_fix_instances();
+}
+
+/**
+ * Fixes some errors in Yild field instances.
+ */
+function _yild_fix_instances() {
+  $yild_vocabulary = variable_get('yild_vocabulary', 'yild_tags');
+  $id_field_name = variable_get('yild_id_field_name', 'yild_ext_id');
+  $provider_field_name = variable_get('yild_provider_field_name', 'yild_provider');
+  $disambiguator_field_name = variable_get('yild_disambiguator_field_name', 'yild_disambiguator');
+  $data_field_name = variable_get('yild_data_field_name', 'yild_data');
+
+  // Instances that should have their display label and type hidden.
+  $hidden_instances = array(
+    $id_field_name,
+    $provider_field_name,
+    $data_field_name,
+  );
+  foreach ($hidden_instances as $hi_name) {
+    $hi = field_info_instance('taxonomy_term', $hi_name, $yild_vocabulary);
+    if (!empty($hi)) {
+      $hi['display'] = array(
+        'default' => array(
+          'label' => 'hidden',
+          'type' => 'hidden',
+        ),
+      );
+      field_update_instance($hi);
+    }
+  }
+
+  // Fixes disambiguator to be shown without label.
+  $dis = field_info_instance('taxonomy_term', $disambiguator_field_name, $yild_vocabulary);
+  if (!empty($dis)) {
+    $dis['display'] = array(
+      'default' => array(
+        'label' => 'hidden',
+      ),
+    );
+    field_update_instance($dis);
+  }
+
+  // Required / optional mapping for instances:
+  $required = array(
+    $id_field_name => TRUE,
+    $provider_field_name => TRUE,
+    $disambiguator_field_name => FALSE,
+    $data_field_name => FALSE,
+  );
+  foreach ($required as $r_name => $req_status) {
+    $r = field_info_instance('taxonomy_term', $r_name, $yild_vocabulary);
+    if (!empty($r)) {
+      $r['required'] = $req_status;
+      field_update_instance($r);
+    }
+  }
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function yild_uninstall() {
+  variable_del('yild_vocabulary');
+  variable_del('yild_provider_field_name');
+  variable_del('yild_id_field_name');
+  variable_del('yild_disambiguator_field_name');
+  variable_del('yild_data_field_name');
+}

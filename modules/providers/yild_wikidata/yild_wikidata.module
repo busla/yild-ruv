@@ -1,0 +1,303 @@
+<?php
+
+/**
+ * @file
+ * Defines a Wikidata provider for Yild.
+ */
+
+define('YILD_WIKIDATA_API', 'https://www.wikidata.org/w/api.php?');
+define('YILD_WIKIDATA_CACHE_LIFETIME', 86400);
+define('YILD_WIKIDATA_MAX_HITS', 20);
+
+/**
+ * Implements hook_yild_search().
+ *
+ * Performs a Yild search specific to Wikidata and return the result.
+ */
+function yild_wikidata_yild_search($search_string, $lang = 'en') {
+  $uri = YILD_WIKIDATA_API . 'action=wbsearchentities&search=' . rawurlencode($search_string) . '&language=' . $lang . '&limit=' . YILD_WIKIDATA_MAX_HITS . '&format=json';
+
+  $cache = _yild_wikidata_get_search_cache($uri);
+  if (!empty($cache)) {
+    $search_result = $cache;
+  }
+  else {
+    $options = array(
+      'method' => 'GET',
+      'timeout' => 3,
+      'headers' => array(
+        'Accept' => 'application/json',
+      ),
+    );
+
+    $result = drupal_http_request($uri, $options);
+    // Only show result if there was no error.
+    if (empty($result->error)) {
+      $search_result = drupal_json_decode($result->data);
+      _yild_wikidata_put_search_cache($uri, $search_result);
+    }
+    else {
+      // TODO: decide on error handling.
+      drupal_set_message(t('The request to @provider resulted in the following error: @error.', array(
+        '@provider' => yild_wikidata_yild_get_provider_name(),
+        '@error' => $result->error,
+      )));
+      return array();
+    }
+  }
+  return _yild_wikidata_parse_result($search_result['search'], $lang);
+}
+
+/**
+ * Retrieves topics from Wikidata in a specific language.
+ *
+ * Wikidata returns topics in English even if searching in a specific language.
+ * In order to get the titles and description in a specific language, we need
+ * to make a separate request to Wikidata in order to have access to the topics
+ * in the correct language.
+ *
+ * The actual request is made in another method (yild_wikidata_get_topics) and
+ * this method merely places the translated values in the correct place and
+ * filters out garbage.
+ *
+ * @param array $data
+ *    An array containing a search result from wikidata.
+ * @param string $lang
+ *    The language code for the chosen language.
+ *
+ * @return array
+ *    The list of found wikidata topics in the chosen language.
+ */
+function yild_wikidata_get_topics_in_lang($data, $lang) {
+  $ids = array();
+  $new_data = array();
+  foreach ($data as $row) {
+    $ids[] = $row['id'];
+  }
+  $langresult = yild_wikidata_get_topics($ids, $lang);
+  if (!empty($langresult['entities'])) {
+    $langresult = $langresult['entities'];
+    foreach ($data as $row) {
+      if (!stristr($row['description'], 'disambiguation page')) {
+        if (!empty($langresult[$row['id']])) {
+          if (!empty($langresult[$row['id']]['labels'][$lang]['value'])) {
+            $row['label'] = $langresult[$row['id']]['labels'][$lang]['value'];
+          }
+          if (!empty($langresult[$row['id']]['descriptions'][$lang]['value'])) {
+            $row['description'] = $langresult[$row['id']]['descriptions'][$lang]['value'];
+          }
+        }
+      }
+      $new_data[] = $row;
+    }
+  }
+  return $new_data;
+}
+
+/**
+ * Retrieves one or several topics from the Wikidata Api.
+ *
+ * @param string|array $id
+ *   The Wikidata Id(s) to fetch the topic for.
+ * @param string $lang
+ *    The language code(s) for the language we want the fetched topics to be
+ *    returned in.
+ *
+ * @return array
+ *   An array of the entire topic from the Wikidata Api.
+ */
+function yild_wikidata_get_topics($id, $lang = 'en') {
+  if (is_array($id)) {
+    $id = implode('|', $id);
+  }
+  // https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q10971514&languages=fi|sv
+  $uri = YILD_WIKIDATA_API . 'action=wbgetentities&ids=' . $id . '&languages=' . $lang . '&format=json';
+  $options = array(
+    'method' => 'GET',
+    'timeout' => 3,
+    'headers' => array(
+      'Accept' => 'application/json',
+    ),
+  );
+
+  $result = drupal_http_request($uri, $options);
+  if (empty($result->error)) {
+    return drupal_json_decode($result->data);
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * Implements hook_yild_additional_data().
+ *
+ * Retrieves additional data for a Wikidata term before saving.
+ */
+function yild_wikidata_additional_data_disabled($id, $lang = 'en') {
+  if (!variable_get('yild_wikidata_get_additional_data', 1)) {
+    return FALSE;
+  }
+  $topic = yild_wikidata_get_topic(_yild_wikidata_get_official_id($id), $lang);
+  $data = array();
+  if (!empty($topic)) {
+    // Retrieve description first.
+    $data['description'] = _yild_wikidata_get_description($topic['property']);
+
+    $data['data'] = array();
+    $image = _yild_wikidata_get_image($topic['property']);
+    $geocode = _yild_wikidata_get_geocode($topic['property']);
+
+    if (!empty($image)) {
+      $data['data']['image'] = $image;
+    }
+    if (!empty($geocode)) {
+      $data['data']['geocode'] = $geocode;
+    }
+  }
+  return $data;
+}
+
+/**
+ * Simply returns the name of the provider.
+ *
+ * @return string
+ *   The name of the provider.
+ */
+function yild_wikidata_yild_get_provider_name() {
+  return 'wikidata';
+}
+
+/**
+ * Retrieves a search result from Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ */
+function _yild_wikidata_get_search_cache($cid) {
+  $cache = cache_get($cid, 'yild-cache');
+  if (!empty($cache)) {
+    if ($cache->expire > time()) {
+      return $cache->data;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Saves a search to Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ * @param array $data
+ *   The data to cache.
+ */
+function _yild_wikidata_put_search_cache($cid, array $data) {
+  cache_set($cid, $data, 'yild-cache', time() + YILD_WIKIDATA_CACHE_LIFETIME);
+}
+
+/**
+ * Parses a Wikidata response to find unique id, name and disambiguation type.
+ *
+ * @param array $result_set
+ *   The result set received from the provider containing the suggestions.
+ *
+ * @return array
+ *   An array with name, disambiguator, description for each autocomplete
+ *   result.
+ */
+function _yild_wikidata_parse_result(array $result_set, $lang = 'en') {
+  $ret = array();
+  // If language is not English, we want to ask Wikipedia for translations.
+  if ($lang != 'en') {
+    $result_set = yild_wikidata_get_topics_in_lang($result_set, $lang);
+  }
+  // Then we assemble the autocomplete list.
+  foreach ($result_set as $result) {
+    $id = _yild_wikidata_get_id($result['id']);
+
+    $data = array();
+    $split_name = _yild_wikidata_get_disambiguator($result);
+
+    $name = !empty($split_name['name']) ? $split_name['name'] : $result['name'];
+    $disambiguator = !empty($split_name['disambiguator']) ? trim($split_name['disambiguator']) : NULL;
+
+    $description = trim($result['description']) != $disambiguator ? trim($result['description']) : '';
+
+    if (!empty($id) && !empty($name) && !stristr($description, 'disambiguation page') && !stristr($disambiguator, 'disambiguation page')) {
+      $ret[$id] = array(
+        'name' => $name,
+        'disambiguator' => $disambiguator,
+        'data' => implode(';', $data),
+        'description' => $description,
+      );
+    }
+  }
+  return $ret;
+}
+
+/**
+ * Extracts the notable type / disambiguator from a search result item.
+ *
+ * @param array $obj
+ *   The array parsed json node of one single search result object.
+ *
+ * @return array
+ *   An array containing name and disambiguator as extracted.
+ */
+function _yild_wikidata_get_disambiguator($obj) {
+  $name = trim($obj['label']);
+
+  // Call Yild's master name splitter.
+  $split_name = _yild_split_name($name);
+  if (empty($split_name['name'])) {
+    $split_name['name'] = $name;
+  }
+
+  // The disambiguator is the description if it's short.
+  $description = trim($obj['description']);
+  $disambiguator = trim($split_name['disambiguator']);
+
+  if (!empty($description) && $description != $split_name['name'] && empty($disambiguator)) {
+    if (strlen($description) <= 50) {
+      $split_name['disambiguator'] = $description;
+    }
+  }
+
+  // If no short description is found, we use the first alias we find.
+  if (!empty($obj['aliases']) && empty($disambiguator)) {
+    foreach ($obj['aliases'] as $a) {
+      $alias = trim($a);
+      if (!empty($alias) && $alias != $split_name['name']) {
+        $split_name['disambiguator'] = $alias;
+        break;
+      }
+    }
+  }
+
+  return $split_name;
+}
+
+/**
+ * Returns a Yild-compatible id based on the Wikidata mid.
+ *
+ * @param string $id
+ *   The mid as provided by Freebase.
+ */
+function _yild_wikidata_get_id($id) {
+  return 'wikidata:' . $id;
+}
+
+/**
+ * Ensures an id is an official Wikidata Id.
+ *
+ * @param string $yild_id
+ *   An id in an unofficial format.
+ *
+ * @return string
+ *   An id in the official format.
+ */
+function _yild_wikidata_get_official_id($yild_id) {
+  $id = str_replace('wikidata:', '', $yild_id);
+  return $id;
+}

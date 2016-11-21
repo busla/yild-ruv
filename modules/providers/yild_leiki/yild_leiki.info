@@ -1,0 +1,13 @@
+name = Yild / Leiki
+description = Provides Leiki analysis integration for Yild
+package = Yild providers
+core = 7.x
+dependencies[] = yild
+configure = admin/config/yild/leiki
+
+; Information added by Drupal.org packaging script on 2016-11-17
+version = "7.x-1.x-dev"
+core = "7.x"
+project = "yild"
+datestamp = "1479402112"
+

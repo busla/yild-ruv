@@ -1,0 +1,271 @@
+<?php
+
+/**
+ * @file
+ * Defines a Knowledge graph provider for Yild.
+ */
+
+define('YILD_KG_API', 'https://kgsearch.googleapis.com/v1/');
+define('YILD_KG_CACHE_LIFETIME', 86400);
+define('YILD_KG_MAX_HITS', 20);
+
+/**
+ * Implements hook_menu().
+ */
+function yild_kg_menu() {
+  $items = array();
+
+  $items['admin/config/yild/kg'] = array(
+    'title' => 'Yild Knowledge graph settings',
+    'description' => 'Settings for Yild Knowledge graph provider.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('yild_kg_admin_settings_form'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'yild.kg.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_yild_search().
+ *
+ * Performs a Yild search specific to Knowledge graph and return the result.
+ */
+function yild_kg_yild_search($search_string, $lang = 'en', $stemmed = FALSE) {
+  $uri = YILD_KG_API . 'entities:search?' . (variable_get('yild_kg_googlekey') ? 'key=' . variable_get('yild_kg_googlekey') . '&' : '') . 'query=' . rawurlencode($search_string) . '&prefix=1&languages=' . $lang . '&limit=' . YILD_KG_MAX_HITS;
+  $cache = _yild_kg_get_search_cache($uri);
+  if (!empty($cache)) {
+    $search_result = $cache;
+  }
+  else {
+    $options = array(
+      'method' => 'GET',
+      'timeout' => 3,
+      'headers' => array(
+        'Accept' => 'application/json',
+      ),
+    );
+
+    $result = drupal_http_request($uri, $options);
+    // Only show result if there was no error.
+    if (empty($result->error)) {
+      $search_result = drupal_json_decode($result->data);
+      _yild_kg_put_search_cache($uri, $search_result);
+    }
+    else {
+      // TODO: decide on error handling.
+      drupal_set_message(t('The request to @provider resulted in the following error: @error.', array(
+        '@provider' => yild_kg_yild_get_provider_name(),
+        '@error' => $result->error,
+      )));
+      return array();
+    }
+  }
+  return _yild_kg_parse_result($search_result['itemListElement']);
+}
+
+/**
+ * Retrieves one topic from the Knowledge graph Api.
+ *
+ * @param string $id
+ *   The Knowledge graph Id to fetch the topic for.
+ *
+ * @return array
+ *   An array of the entire topic from the Knowledge graph Api.
+ */
+function yild_kg_get_topic($id, $lang = 'en') {
+
+  $uri = YILD_KG_API . 'entities:search?' . (variable_get('yild_kg_googlekey') ? 'key=' . variable_get('yild_kg_googlekey') . '&' : '') . 'ids=' . $id . '&languages=' . $lang . '&limit=' . YILD_KG_MAX_HITS;
+  $options = array(
+    'method' => 'GET',
+    'timeout' => 3,
+    'headers' => array(
+      'Accept' => 'application/json',
+    ),
+  );
+
+  $result = drupal_http_request($uri, $options);
+  if (empty($result->error)) {
+    return drupal_json_decode($result->data);
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * Implements hook_yild_additional_data().
+ */
+function yild_kg_additional_data($id, $lang = 'en') {
+  if (!variable_get('yild_kg_get_additional_data', 1)) {
+    return FALSE;
+  }
+  $topic = yild_kg_get_topic(_yild_kg_get_official_id($id), $lang);
+  $data = array();
+  if (!empty($topic)) {
+    // Retrieve description first.
+    $data['description'] = _yild_kg_get_description($topic['property']);
+
+    $data['data'] = array();
+    $image = _yild_kg_get_image($topic['property']);
+    $geocode = _yild_kg_get_geocode($topic['property']);
+
+    if (!empty($image)) {
+      $data['data']['image'] = $image;
+    }
+    if (!empty($geocode)) {
+      $data['data']['geocode'] = $geocode;
+    }
+  }
+  return $data;
+}
+
+/**
+ * Implements hook_yild_geolocation().
+ */
+function yild_kg_yild_geolocation() {
+  return TRUE;
+}
+
+/**
+ * Simply returns the name of the provider.
+ *
+ * @return string
+ *   The name of the provider.
+ */
+function yild_kg_yild_get_provider_name() {
+  return 'kg';
+}
+
+/**
+ * Retrieves a search result from Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ */
+function _yild_kg_get_search_cache($cid) {
+  $cache = cache_get($cid, 'yild-cache');
+  if (!empty($cache)) {
+    if ($cache->expire > time()) {
+      return $cache->data;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Saves a search to Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ * @param array $data
+ *   The data to cache.
+ */
+function _yild_kg_put_search_cache($cid, array $data) {
+  cache_set($cid, $data, 'yild-cache', time() + YILD_KG_CACHE_LIFETIME);
+}
+
+/**
+ * Parses a Knowledge graph response to find unique id, name and disambiguation.
+ *
+ * @param array $result_set
+ *   The result set received from the provider containing the suggestions.
+ *
+ * @return array
+ *   An array with name, disambiguator, description for each autocomplete
+ *   result.
+ */
+function _yild_kg_parse_result(array $result_set) {
+  $ret = array();
+  foreach ($result_set as $result) {
+    $result = $result['result'];
+    $data = array();
+    $id = _yild_kg_get_id($result['@id']);
+
+    $name = !empty($result['name']) ? $result['name'] : '';
+    $disambiguator = !empty($result['description']) ? $result['description'] : '';
+
+    $description = variable_get('yild_kg_show_description', 1) && !empty($result['detailedDescription']) ? $result['detailedDescription']['articleBody'] : '';
+    $image = !empty($result['image']) ? $result['image']['contentUrl'] : '';
+    if (!empty($image)) {
+      $data[] = 'image:' . $image;
+    }
+
+    if (!empty($id) && !empty($name)) {
+      $ret[$id] = array(
+        'name' => $name,
+        'disambiguator' => $disambiguator,
+        'data' => implode(';', $data),
+        'description' => $description,
+      );
+    }
+  }
+  return $ret;
+}
+
+/**
+ * Extracts the geocode coordinates from a Knowledge graph response.
+ *
+ * @param array $obj
+ *   The Knowledge graph result node that may contain the geolocation.
+ *
+ * @return array
+ *   The coordinates as Array('long' => , 'lat' => );
+ */
+function _yild_kg_get_geocode($obj) {
+  $lat = $lng = 0;
+  if (!empty($obj['/location/location/geolocation'])) {
+    if (!empty($obj['/location/location/geolocation']['values'])) {
+      $geo_vals = reset($obj['/location/location/geolocation']['values']);
+      $geo_prop = $geo_vals['property'];
+      if (!empty($geo_prop['/location/geocode/latitude'])) {
+        $lat_vals = reset($geo_prop['/location/geocode/latitude']['values']);
+        $lat = $lat_vals['value'];
+      }
+      if (!empty($geo_prop['/location/geocode/longitude'])) {
+        $lng_vals = reset($geo_prop['/location/geocode/longitude']['values']);
+        $lng = $lng_vals['value'];
+      }
+
+    }
+    elseif (!empty($obj['/location/location/geolocation']['/location/location/geolocation'])) {
+      $first_coord = reset($obj['/location/location/geolocation']['/location/location/geolocation']);
+      if (!empty($first_coord)) {
+        $lng = $first_coord['longitude'];
+        $lat = $first_coord['latitude'];
+      }
+    }
+  }
+  if (!empty($lat) && !empty($lng)) {
+    return array('latitude' => $lat, 'longitude' => $lng);
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * Returns a Yild-compatible id based on the Knowledge graph id.
+ *
+ * In this particular provider, the Yild internal id is the same as the KG id.
+ *
+ * @param string $id
+ *   The mid as provided by Knowledge graph.
+ */
+function _yild_kg_get_id($id) {
+  return $id;
+}
+
+/**
+ * Ensures an id is an official /m/12345 Knowledge graph Id.
+ *
+ * @param string $yild_id
+ *   An id in an unofficial format.
+ *
+ * @return string
+ *   An id in the official format.
+ */
+function _yild_kg_get_official_id($yild_id) {
+  return $yild_id;
+}

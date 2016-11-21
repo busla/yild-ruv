@@ -1,0 +1,358 @@
+<?php
+
+/**
+ * @file
+ * Defines a Freebase provider for Yild.
+ *
+ * NOTE: Freebase has been shut down and this will make this provider module
+ * obsolete in the near future.
+ */
+
+define('YILD_FREEBASE_API', 'https://www.googleapis.com/freebase/v1/');
+define('YILD_FREEBASE_CACHE_LIFETIME', 86400);
+define('YILD_FREEBASE_MAX_HITS', 20);
+
+/**
+ * Implements hook_menu().
+ */
+function yild_freebase_menu() {
+  $items = array();
+
+  $items['admin/config/yild/freebase'] = array(
+    'title' => 'Yild Freebase settings',
+    'description' => 'Settings for Yild Freebase provider.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('yild_freebase_admin_settings_form'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'yild.freebase.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_yild_search().
+ */
+function yild_freebase_yild_search($search_string, $lang = 'en', $stemmed = FALSE) {
+  $uri = YILD_FREEBASE_API . 'search?' . (variable_get('yild_freebase_googlekey') ? 'key=' . variable_get('yild_freebase_googlekey') . '&' : '') . 'query=' . rawurlencode($search_string) . '&' . ($stemmed ? 'stemmed=true' : 'prefixed=true') . '&limit=' . YILD_FREEBASE_MAX_HITS . '&output=(/common/topic/description%20/common/topic/image%20/location/location/geolocation)&lang=' . $lang;
+  $cache = _yild_freebase_get_search_cache($uri);
+  if (!empty($cache)) {
+    $search_result = $cache;
+  }
+  else {
+    $options = array(
+      'method' => 'GET',
+      'timeout' => 3,
+      'headers' => array(
+        'Accept' => 'application/json',
+      ),
+    );
+
+    $result = drupal_http_request($uri, $options);
+    // Only show result if there was no error.
+    if (empty($result->error)) {
+      $search_result = drupal_json_decode($result->data);
+      _yild_freebase_put_search_cache($uri, $search_result);
+    }
+    else {
+      // TODO: decide on error handling.
+      drupal_set_message(t('The request to @provider resulted in the following error: @error.', array(
+        '@provider' => yild_freebase_yild_get_provider_name(),
+        '@error' => ' ' . $result->error,
+      )));
+      return array();
+    }
+  }
+  return _yild_freebase_parse_result($search_result['result']);
+}
+
+/**
+ * Retrieves one topic from the Freebase Api.
+ *
+ * @param string $id
+ *   The Freebase Id to fetch the topic for.
+ *
+ * @return array
+ *   An array of the entire topic from the Freebase Api.
+ */
+function yild_freebase_get_topic($id, $lang = 'en') {
+  // http://www.googleapis.com/freebase/v1/topic/m/019xhk
+  $uri = YILD_FREEBASE_API . 'topic' . _yild_freebase_get_official_id($id) . '?filter=/common/topic/description&filter=/common/topic/image&filter=/location/location/geolocation&lang=' . $lang . (variable_get('yild_freebase_googlekey') ? '&key=' . variable_get('yild_freebase_googlekey') : '');
+  $options = array(
+    'method' => 'GET',
+    'timeout' => 3,
+    'headers' => array(
+      'Accept' => 'application/json',
+    ),
+  );
+
+  $result = drupal_http_request($uri, $options);
+  if (empty($result->error)) {
+    return drupal_json_decode($result->data);
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * Implements hook_yild_additional_data().
+ */
+function yild_freebase_additional_data($id, $lang = 'en') {
+  if (!variable_get('yild_freebase_get_additional_data', 1)) {
+    return FALSE;
+  }
+  $topic = yild_freebase_get_topic(_yild_freebase_get_official_id($id), $lang);
+  $data = array();
+  if (!empty($topic)) {
+    // Retrieve description first.
+    $data['description'] = _yild_freebase_get_description($topic['property']);
+
+    $data['data'] = array();
+    $image = _yild_freebase_get_image($topic['property']);
+    $geocode = _yild_freebase_get_geocode($topic['property']);
+
+    if (!empty($image)) {
+      $data['data']['image'] = $image;
+    }
+    if (!empty($geocode)) {
+      $data['data']['geocode'] = $geocode;
+    }
+  }
+  return $data;
+}
+
+/**
+ * Implements hook_yild_geolocation().
+ *
+ * Indicates this provider supports geolocation with longitude/latitude
+ * coordinates.
+ */
+function yild_freebase_yild_geolocation() {
+  return TRUE;
+}
+
+/**
+ * Simply returns the name of the provider.
+ *
+ * @return string
+ *   The name of the provider.
+ */
+function yild_freebase_yild_get_provider_name() {
+  return 'freebase';
+}
+
+/**
+ * Retrieves a search result from Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ */
+function _yild_freebase_get_search_cache($cid) {
+  $cache = cache_get($cid, 'yild-cache');
+  if (!empty($cache)) {
+    if ($cache->expire > time()) {
+      return $cache->data;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Saves a search to Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ * @param array $data
+ *   The data to cache.
+ */
+function _yild_freebase_put_search_cache($cid, array $data) {
+  cache_set($cid, $data, 'yild-cache', time() + YILD_FREEBASE_CACHE_LIFETIME);
+}
+
+/**
+ * Parses a Freebase response to find unique id, name and disambiguation type.
+ *
+ * @param array $result_set
+ *   The result set received from the provider containing the suggestions.
+ *
+ * @return array
+ *   An array with name, disambiguator, description for each autocomplete
+ *   result.
+ */
+function _yild_freebase_parse_result(array $result_set) {
+  $ret = array();
+  foreach ($result_set as $result) {
+    $data = array();
+    $id = _yild_freebase_get_id($result['mid']);
+    $split_name = _yild_freebase_get_disambiguator($result);
+
+    $name = !empty($split_name['name']) ? $split_name['name'] : $result['name'];
+    $disambiguator = !empty($split_name['disambiguator']) ? trim($split_name['disambiguator']) : NULL;
+
+    $description = variable_get('yild_freebase_show_description', 1) ? _yild_freebase_get_description($result['output']) : '';
+    $image = _yild_freebase_get_image($result['output']);
+    if (!empty($image)) {
+      $data[] = 'image:' . $image;
+    }
+
+    if (variable_get('yild_freebase_show_description', 1)) {
+      $description = _yild_freebase_get_description($result['output']);
+    }
+    else {
+      $description = '';
+    }
+    if (!empty($id) && !empty($name)) {
+      $ret[$id] = array(
+        'name' => $name,
+        'disambiguator' => $disambiguator,
+        'data' => implode(';', $data),
+        'description' => $description,
+      );
+    }
+  }
+  return $ret;
+}
+
+/**
+ * Extracts the notable type / disambiguator from a search result item.
+ *
+ * @param array $obj
+ *   The array parsed json node of one single search result object.
+ *
+ * @return array
+ *   An array containing name and disambiguator as extracted.
+ */
+function _yild_freebase_get_disambiguator($obj) {
+  $name = $obj['name'];
+
+  // Call Yild's master name splitter.
+  $split_name = _yild_split_name($name);
+
+  if (empty($split_name['name'])) {
+    $split_name['name'] = $name;
+  }
+
+  if (!empty($obj['notable']['name'])) {
+    $split_name['disambiguator'] = $obj['notable']['name'];
+  }
+
+  return $split_name;
+}
+
+/**
+ * Extracts the description from a Freebase response.
+ *
+ * @param array $obj
+ *   The Freebase result node that may contain the description.
+ *
+ * @return string
+ *   The description if found and enabled, FALSE otherwise.
+ */
+function _yild_freebase_get_description($obj) {
+  if (!empty($obj['/common/topic/description'])) {
+    if (!empty($obj['/common/topic/description']['values'])) {
+      $desc_vals = reset($obj['/common/topic/description']['values']);
+      return !empty($desc_vals['value']) ? $desc_vals['value'] : FALSE;
+    }
+    elseif (!empty($obj['/common/topic/description']['/common/topic/description'])) {
+      return reset($obj['/common/topic/description']['/common/topic/description']);
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Extracts the image from a Freebase response.
+ *
+ * @param array $obj
+ *   The Freebase result node that may contain the image.
+ *
+ * @return string
+ *   The Image id from Freebase if found and enabled, FALSE otherwise.
+ */
+function _yild_freebase_get_image($obj) {
+  if (!empty($obj['/common/topic/image'])) {
+    if (!empty($obj['/common/topic/image']['values'])) {
+      $img_vals = reset($obj['/common/topic/image']['values']);
+      return !empty($img_vals['id']) ? $img_vals['id'] : FALSE;
+    }
+    elseif (!empty($obj['/common/topic/image']['/common/topic/image'])) {
+      $first_image = reset($obj['/common/topic/image']['/common/topic/image']);
+      if (!empty($first_image['mid'])) {
+        return $first_image['mid'];
+      }
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Extracts the geocode coordinates from a Freebase response.
+ *
+ * @param array $obj
+ *   The Freebase result node that may contain the geolocation.
+ *
+ * @return array
+ *   The coordinates as Array('long' => , 'lat' => );
+ */
+function _yild_freebase_get_geocode($obj) {
+  $lat = $lng = 0;
+  if (!empty($obj['/location/location/geolocation'])) {
+    if (!empty($obj['/location/location/geolocation']['values'])) {
+      $geo_vals = reset($obj['/location/location/geolocation']['values']);
+      $geo_prop = $geo_vals['property'];
+      if (!empty($geo_prop['/location/geocode/latitude'])) {
+        $lat_vals = reset($geo_prop['/location/geocode/latitude']['values']);
+        $lat = $lat_vals['value'];
+      }
+      if (!empty($geo_prop['/location/geocode/longitude'])) {
+        $lng_vals = reset($geo_prop['/location/geocode/longitude']['values']);
+        $lng = $lng_vals['value'];
+      }
+
+    }
+    elseif (!empty($obj['/location/location/geolocation']['/location/location/geolocation'])) {
+      $first_coord = reset($obj['/location/location/geolocation']['/location/location/geolocation']);
+      if (!empty($first_coord)) {
+        $lng = $first_coord['longitude'];
+        $lat = $first_coord['latitude'];
+      }
+    }
+  }
+  if (!empty($lat) && !empty($lng)) {
+    return array('latitude' => $lat, 'longitude' => $lng);
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * Returns a Yild-compatible id based on the Freebase mid.
+ *
+ * @param string $mid
+ *   The mid as provided by Freebase.
+ */
+function _yild_freebase_get_id($mid) {
+  return 'freebase:' . $mid;
+}
+
+/**
+ * Ensures an id is an official /m/12345 Freebase Id.
+ *
+ * @param string $yild_id
+ *   An id in an unofficial format.
+ *
+ * @return string
+ *   An id in the official format.
+ */
+function _yild_freebase_get_official_id($yild_id) {
+  $id = str_replace('freebase:', '', $yild_id);
+
+  // Legacy compatibility. The stored format used to be m.12345.
+  if (stristr($id, 'm.')) {
+    $id = str_replace('m.', '/m/', $id);
+  }
+  return $id;
+}

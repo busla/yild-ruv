@@ -1,0 +1,119 @@
+<?php
+
+/**
+ * @file
+ * Defines a Leiki provider for Yild.
+ *
+ * Leiki is a closed source term repository that provides both their own
+ * taxonomy in Finnish, Swedish and English, as well as a service for analysing
+ * a text and returning term suggestions based on its best understanding of
+ * that text.
+ *
+ * This module provides a bridge that analyses a text using Leiki, returns the
+ * terms and then matches them against other providers.
+ */
+
+define('YILD_LEIKI_API', 'https://kiwi11.leiki.com/focus/api');
+define('YILD_LEIKI_CACHE_LIFETIME', 86400);
+
+/**
+ * Implements hook_menu().
+ */
+function yild_leiki_menu() {
+  $items = array();
+
+  $items['admin/config/yild/leiki'] = array(
+    'title' => 'Yild Leiki settings',
+    'description' => 'Settings for Yild Leiki provider.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('yild_leiki_admin_settings_form'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'yild.leiki.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_yild_analyse().
+ */
+function yild_leiki_yild_analyse($text, $lang = NULL) {
+  // https://kiwi11.leiki.com/focus/api?method=analyse&apiuser=USR&apipassword=PWD&lang=en&lang_category=en&format=json
+  $uri = YILD_LEIKI_API . '?method=analyse&apiuser=' . variable_get('yild_leiki_apiuser') . '&apipassword=' . variable_get('yild_leiki_apipassword') . '&lang=' . variable_get('yild_result_language', 'en') . '&lang_category=' . variable_get('yild_result_language', 'en') . '&format=json';
+  $options = array(
+    'method' => 'POST',
+    'timeout' => 15,
+    'data' => 'target=' . strip_tags($text),
+    'headers' => array('Content-Type' => 'application/x-www-form-urlencoded; charset=utf-8'),
+  );
+  $leikiresult = drupal_http_request($uri, $options);
+  $leikidata = drupal_json_decode($leikiresult->data);
+  $leikitags = array();
+  $debug = variable_get('yild_leiki_debug', FALSE) ? array(
+    'leiki' => '',
+    'freebase' => '',
+    'finto' => '',
+  ) : FALSE;
+
+  // Assemble list of viable Leiki tags.
+  foreach ($leikidata['data']['items'] as $item) {
+    if ($debug) {
+      $debug['leiki'] .= ' [' . $item['relevance'] . ':' . $item['title'] . '] ';
+    }
+    if (!empty($item['relevance']) && !empty($item['ID']) && !empty($item['title'])) {
+      if ($item['relevance'] >= variable_get('yild_leiki_score_threshold', '5')) {
+        if (count($leikitags) < variable_get('yild_leiki_max_suggestions', '4')) {
+          $leikitags['leiki:' . $item['ID']] = array('name' => $item['title']);
+        }
+      }
+    }
+  }
+
+  $providers = explode(',', variable_get('yild_leiki_analysis_bridge', 'freebase,finto'));
+  if (count($providers) > 0) {
+    $ret = array('debug' => array('leiki' => $leikidata));
+    foreach ($leikitags as $lt) {
+      foreach ($providers as $provider) {
+        $provider_results = module_invoke('yild_' . $provider, 'yild_search', $lt['name'], variable_get('yild_result_language', 'en'), TRUE);
+        $provider_ret = array();
+        $provider_similarity = array();
+        foreach ($provider_results as $pr_id => $pr) {
+          if ($debug) {
+            $debug[$provider] .= '[ ' . $pr['name'] . ' <span style="color: #777;">(' . $pr['disambiguator'] . ')</span>] ';
+          }
+
+          if (!empty($pr['disambiguator'])) {
+            similar_text(strtolower($pr['name']), strtolower($lt['name']), $similarity);
+            if ($similarity >= variable_get('yild_leiki_similarity_threshold', 85)) {
+              // Add similarity percentage to array for sorting.
+              $provider_similarity[] = $similarity;
+              $provider_ret[$pr_id] = $pr;
+            }
+          }
+        }
+        array_multisort($provider_ret, $provider_similarity, SORT_DESC);
+        $ret = array_merge($ret, array_slice($provider_ret, 0, variable_get('yild_leiki_max_suggestions', 4)));
+      }
+    }
+    $ret['debug'] = '';
+    if ($debug) {
+      foreach ($debug as $provider => $debugdata) {
+        $ret['debug'] .= '<div style="font-size: 0.8em; margin-bottom: 1em; padding: 1em; border: 1px solid #ccc;"><span style="color: #777;">' . strtoupper($provider) . '</span>: ' . $debugdata . '</div>';
+      }
+    }
+    return $ret;
+  }
+  else {
+    return $leikitags;
+  }
+}
+
+/**
+ * Simply returns the name of the provider.
+ *
+ * @return string
+ *   The name of the provider.
+ */
+function yild_leiki_yild_get_provider_name() {
+  return 'leiki';
+}

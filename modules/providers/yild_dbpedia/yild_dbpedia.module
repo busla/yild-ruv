@@ -1,0 +1,212 @@
+<?php
+
+/**
+ * @file
+ * Defines a Dbpedia provider for Yild.
+ */
+
+// Uncomment to use REST URI instead.
+// define('YILD_DBPEDIA_API', 'http://lookup.dbpedia.org/api/');
+define('YILD_DBPEDIA_API', 'http://dbpedia.org/sparql');
+define('YILD_DBPEDIA_CACHE_LIFETIME', 86400);
+define('YILD_DBPEDIA_MAX_HITS', 10);
+
+/**
+ * Implements hook_yild_search().
+ *
+ * Performs a Yild search specific to Dbpedia.
+ */
+function yild_dbpedia_yild_search($search_string, $lang = 'en') {
+  return _yild_dbpedia_yild_search_sparql($search_string, $lang);
+  // Uncomment below and comment above to change to REST lookup.
+  // return _yild_dbpedia_yild_search_rest($search_string, $lang);
+}
+
+/**
+ * Performs a Yild search specific to Dbpedia using Sparql.
+ */
+function _yild_dbpedia_yild_search_sparql($search_string, $lang = 'en') {
+  $query
+    = 'PREFIX : <http://dbpedia.org/resource/>
+    PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+    SELECT ?uri ?label WHERE {
+      ?uri rdfs:label ?label.
+      ?uri rdf:type owl:Thing.
+      ?label bif:contains \'"' . $search_string . '"\'.
+      FILTER (lang(?label) = "' . $lang . '")
+    }
+    LIMIT 10';
+
+  $uri = YILD_DBPEDIA_API . '?query=' . urlencode($query) . '&format=json';
+  $cache = _yild_dbpedia_get_search_cache($uri);
+
+  if (!empty($cache)) {
+    $search_result = $cache;
+  }
+  else {
+    $options = array(
+      'method' => 'GET',
+      'timeout' => 3,
+    );
+    $result = drupal_http_request($uri, $options);
+
+    if (empty($result->error)) {
+      $search_result = drupal_json_decode($result->data);
+      _yild_dbpedia_put_search_cache($uri, $search_result);
+    }
+    else {
+      // TODO: decide on error handling.
+      drupal_set_message(t('The request to @provider resulted in the following error: @error.', array(
+        '@provider' => yild_dbpedia_yild_get_provider_name(),
+        '@error' => $result->error,
+      )));
+      return array();
+    }
+  }
+
+  return _yild_dbpedia_parse_sparql_result($search_result['results']['bindings']);
+}
+
+/**
+ * Performs a Yild search specific to Dbpedia using normal REST.
+ *
+ * The lookup service is the correct way to look up autocomplete strings in
+ * Dbpedia. Unfortunately it doesn't support languages.
+ */
+function _yild_dbpedia_yild_search_rest($search_string, $lang = 'en') {
+  $uri = YILD_DBPEDIA_API . 'search.asmx/PrefixSearch?QueryClass=&MaxHits=' . YILD_DBPEDIA_MAX_HITS . '&QueryString=' . rawurlencode($search_string);
+  $cache = _yild_dbpedia_get_search_cache($uri);
+  if (!empty($cache)) {
+    $search_result = $cache;
+  }
+  else {
+    $options = array(
+      'method' => 'GET',
+      'timeout' => 3,
+      'headers' => array(
+        'Accept' => 'application/json',
+      ),
+    );
+    $result = drupal_http_request($uri, $options);
+    // Only show result if there was no error.
+    if (empty($result->error)) {
+      $search_result = drupal_json_decode($result->data);
+      _yild_dbpedia_put_search_cache($uri, $search_result);
+    }
+    else {
+      // TODO: decide on error handling.
+      drupal_set_message(t('The request to @provider resulted in the following error: @error.', array(
+        '@provider' => yild_dbpedia_yild_get_provider_name(),
+        '@error' => $result->error,
+      )));
+      return array();
+    }
+  }
+
+  return _yild_dbpedia_parse_result($search_result['results']);
+}
+
+/**
+ * Simply returns the name of the provider.
+ *
+ * @return string
+ *   The name of the provider.
+ */
+function yild_dbpedia_yild_get_provider_name() {
+  return 'dbpedia';
+}
+
+/**
+ * Retrieves a search result from Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ */
+function _yild_dbpedia_get_search_cache($cid) {
+  $cache = cache_get($cid, 'yild-cache');
+  if (!empty($cache)) {
+    if ($cache->expire > time()) {
+      return $cache->data;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Saves a search to Drupal's internal cache.
+ *
+ * @param string $cid
+ *   The cache id to use.
+ * @param array $data
+ *   The data to cache.
+ */
+function _yild_dbpedia_put_search_cache($cid, array $data) {
+  cache_set($cid, $data, 'yild-cache', time() + YILD_DBPEDIA_CACHE_LIFETIME);
+}
+
+/**
+ * Parses a Dbpedia response to find unique id, name and disambiguation type.
+ *
+ * @param array $result_set
+ *   The result set received from the provider containing the suggestions.
+ */
+function _yild_dbpedia_parse_result(array $result_set) {
+  $ret = array();
+  foreach ($result_set as $result) {
+    $id = _yild_dbpedia_get_id($result['uri']);
+    $name = $result['label'];
+    $type = _yild_dbpedia_get_type($result);
+    if (!empty($id) && !empty($name)) {
+
+      $ret[$id] = array('name' => $name, 'disambiguator' => $type);
+    }
+  }
+  return $ret;
+}
+
+/**
+ * Parses a Dbpedia sparql response to find unique id, name and disambiguation.
+ *
+ * @param array $result_set
+ *   The result set received from the provider containing the suggestions.
+ */
+function _yild_dbpedia_parse_sparql_result(array $result_set) {
+  $ret = array();
+  foreach ($result_set as $result) {
+    $id = _yild_dbpedia_get_id($result['uri']['value']);
+    $name = $result['label']['value'];
+
+    // Sometimes dbpedia puts the disambiguator in the title, such as
+    // George Bush (Racing Driver). Let's clean that up.
+    $categorypattern = '/\(([^)]+)\)/';
+    if (preg_match($categorypattern, $name, $matches)) {
+      $disambiguator = $matches[1];
+      $name = trim(str_replace('(' . $matches[1] . ')', '', $name));
+    }
+    $ret[$id] = array('name' => $name, 'disambiguator' => !empty($disambiguator) ? $disambiguator : NULL);
+  }
+  return $ret;
+}
+
+/**
+ * Extracts either the notable type or the first type from a search result item.
+ */
+function _yild_dbpedia_get_type($obj) {
+  foreach ($obj['categories'] as $c) {
+    if (!empty($c['label'])) {
+      return $c['label'];
+    }
+  }
+}
+
+/**
+ * Returns a Yild-compatible id based on the Dbpedia mid.
+ *
+ * @param string $uri
+ *   The id as provided by Dbpedia.
+ */
+function _yild_dbpedia_get_id($uri) {
+  $uri = str_ireplace('http://dbpedia.org/resource/', '', $uri);
+  return str_replace(' ', '', 'dbpedia:' . $uri);
+}
