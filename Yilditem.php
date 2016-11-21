@@ -682,7 +682,7 @@ class Yilditem {
     }
 
     // Use the instance id:s if id-parameter is empty.
-    if (empty($ids)) {
+    if (count($ids) > 0) {
       $ids = array($this->id);
       if (!empty($this->altId)) {
         $ids[] = $this->altId;
